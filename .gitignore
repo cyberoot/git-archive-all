@@ -7,3 +7,5 @@ profile
  
 # emacs noise
 *~
+# PyCharm stuff
+.idea

@@ -9,7 +9,11 @@ Creates archive from the current state using `git ls-files --cached --full-name 
   **--version**             Show program's version number and exit.
   
   **-h, --help**            Show this help message and exit.
-  
+
+  **--git-dir**             Specify working git repo directory.
+
+  **--revision**            Specify revision or branch to export.
+
   **--prefix=PREFIX**       Prepend PREFIX to each filename in the archive. OUTPUT_FILE name is used by default to avoid tarbomb.
 
   **--force-submodules**    Force a `git submodule init && git submodule update` at each level before iterating submodules
