@@ -8,6 +8,7 @@ import sys
 from os import path, extsep
 from subprocess import Popen, PIPE
 from shutil import rmtree
+from pprint import pprint
 import time
 import tempfile
 
@@ -67,31 +68,23 @@ class GitArchiver(object):
         self.main_repo_abspath = main_repo_abspath
         self.revision = revision
 
-    def prepare_buffer_repo(self,dry_run=False):
+    def prepare_buffer_repo(self):
         """
         Prepares the buffer repository to export
 
-        @type dry_run:  bool
-        @param dry_run: Determines whether create should do nothing but print what it would archive.
+        """
+        self.buffer_repo_path = path.join(tempfile.gettempdir(), str(int(time.time())))
+        self.run_shell('git clone --recursive ' + self.main_repo_abspath + ' ' + self.buffer_repo_path)
+        self.run_shell('git reset --hard ' + self.revision, self.buffer_repo_path)
+        if self.verbose:
+            print "Initialized temporary repository at {f}".format(f=self.buffer_repo_path)
+
+    def clean_buffer_repo(self):
+        """
+        Cleans up temp dir
 
         """
-        if not dry_run:
-            self.buffer_repo_path = path.join(tempfile.gettempdir(), str(int(time.time())))
-            self.run_shell('git clone --recursive ' + self.main_repo_abspath + ' ' + self.buffer_repo_path)
-            self.run_shell('git reset --hard ' + self.revision, self.buffer_repo_path)
-            if self.verbose:
-                print "Initialized temporary repository at {f}".format(f=self.buffer_repo_path)
-
-    def clean_buffer_repo(self,dry_run=False):
-        """
-        Cleanes up temp dir
-
-        @type dry_run:  bool
-        @param dry_run: Determines whether create should do nothing but print what it would archive.
-
-        """
-        if not dry_run:
-            rmtree(self.buffer_repo_path)
+        rmtree(self.buffer_repo_path)
 
     def create(self, output_file_path, dry_run=False, format=None):
         """
@@ -110,7 +103,8 @@ class GitArchiver(object):
         @param format:  Determines format of the output archive. If None, format is determined from extension.
         """
 
-        self.prepare_buffer_repo(dry_run)
+        self.prepare_buffer_repo()
+        files = set()
         if format is None:
             file_name, file_ext = path.splitext(output_file_path)
             format = file_ext[len(extsep):].lower()
@@ -139,7 +133,9 @@ class GitArchiver(object):
             if not dry_run:
                 if self.verbose:
                     print "Compressing {f} => {a}...".format(f=file_path, a=path.join(self.prefix, file_path))
-                add(file_path, file_path)
+                if not file_path in files:
+                    add(file_path, file_path)
+                    files.add(file_path)
             else:
                 print "{f} => {a}".format(f=file_path, a=path.join(self.prefix, file_path))
 
@@ -147,12 +143,14 @@ class GitArchiver(object):
             if not dry_run:
                 if self.verbose:
                     print "Compressing {f} => {a}...".format(f=path.join(self.main_repo_abspath, file_path), a=path.join(self.prefix, file_path))
-                add(path.join(self.main_repo_abspath, file_path), file_path)
+                if not file_path in files:
+                    add(path.join(self.main_repo_abspath, file_path), file_path)
+                    files.add(file_path)
             else:
                 print "{f} => {a}".format(f=path.join(self.main_repo_abspath, file_path), a=path.join(self.prefix, file_path))
 
         output_archive.close()
-        self.clean_buffer_repo(dry_run)
+        self.clean_buffer_repo()
 
     def get_path_components(self, repo_abspath, abspath):
         """
@@ -276,6 +274,16 @@ class GitArchiver(object):
 
         return is_excluded
 
+
+    def is_file_invalid(self, file_name, repo_file_path, repo_abspath, exclude_patterns):
+        if file_name.startswith('.git') or (not path.islink(repo_file_path) and path.isdir(repo_file_path)):
+            return True
+        else:
+            if self.is_file_excluded(repo_abspath, repo_file_path, exclude_patterns):
+                return True
+            else:
+                return False
+
     def list_files(self, repo_path=''):
         """
         An iterator method that yields a file path relative to main_repo_abspath
@@ -291,8 +299,9 @@ class GitArchiver(object):
         @rtype:     iterator
         @return:    Iterator to traverse files under git control relative to main_repo_abspath.
         """
+
         repo_abspath = path.join(self.buffer_repo_path, repo_path)
-        repo_file_paths = self.run_shell('git ls-files --cached --full-name --no-empty-directory', repo_abspath).splitlines()
+        repo_file_paths = self.run_shell('git ls-files --cached --full-name --exclude-standard', repo_abspath).splitlines()
         exclude_patterns = self.get_exclude_patterns(repo_abspath, repo_file_paths)
 
         for repo_file_path in repo_file_paths:
@@ -300,13 +309,10 @@ class GitArchiver(object):
             file_name = path.basename(repo_file_path)
 
             # Only list symlinks and files that don't start with git.
-            if file_name.startswith('.git') or (not path.islink(repo_file_path) and path.isdir(repo_file_path)):
+            if self.is_file_invalid(file_name, repo_file_path, repo_abspath, exclude_patterns):
                 continue
 
             main_repo_file_path = path.join(repo_path, repo_file_path)  # file path relative to the main repo
-
-            if self.is_file_excluded(repo_abspath, repo_file_path, exclude_patterns):
-                continue
 
             # Yield both repo_file_path and main_repo_file_path to preserve structure of the repo.
             yield main_repo_file_path
@@ -320,7 +326,10 @@ class GitArchiver(object):
             # In order to get output path we need to exclude repository path from submodule_path.
             submodule_path = path.relpath(submodule_path, self.main_repo_abspath)
             for file_path in self.list_files(submodule_path):
-                yield file_path
+                sub_repo_file_path = path.join(path.basename(submodule_path), path.relpath(file_path, submodule_path))
+                # FIXME: Take into considerations submodule's .gitignore and stuff
+                if not self.is_file_invalid(path.basename(sub_repo_file_path), sub_repo_file_path, repo_abspath, exclude_patterns):
+                    yield sub_repo_file_path
 
     @staticmethod
     def run_shell(cmd, cwd=None):
