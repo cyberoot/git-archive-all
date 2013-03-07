@@ -1,14 +1,15 @@
 #! /usr/bin/env python
 # coding=utf-8
 
-__version__ = "1.5.1-CustisMod"
+__version__ = "1.5.2-CustisMod"
 # forked from https://github.com/Kentzo/git-archive-all
 
 import sys
 from os import path, extsep
 from subprocess import Popen, PIPE
 from shutil import rmtree
-from pprint import pprint
+# from pprint import pprint
+import re
 import time
 import tempfile
 
@@ -24,7 +25,7 @@ class GitArchiver(object):
     Automatically detects output format extension: zip, tar, bz2, or gz.
     """
 
-    def __init__(self, prefix='', verbose=False, exclude=True, force_sub=False, extra=None, main_repo_abspath=None, revision=None):
+    def __init__(self, prefix='', verbose=False, exclude=True, force_sub=False, extra=None, main_repo=None, revision=None):
         """
         @type prefix:   string
         @param prefix:  Prefix used to prepend all paths in the resulting archive.
@@ -43,8 +44,8 @@ class GitArchiver(object):
         @type extra:    list
         @param extra:   List of extra paths to include in the resulting archive.
 
-        @type main_repo_abspath:    string
-        @param main_repo_abspath:   Absolute path to the main repository. If None, current cwd is used.
+        @type main_repo:    string
+        @param main_repo:   Absolute path to the main repository. If None, current cwd is used.
 
         @type revision:    string
         @param revision:   Either SHA-1 or branch of revision to export, default is HEAD.
@@ -52,10 +53,8 @@ class GitArchiver(object):
         if extra is None:
             extra = []
 
-        if main_repo_abspath is None:
-            main_repo_abspath = path.abspath('')
-        elif not path.isabs(main_repo_abspath):
-            raise ValueError("You MUST pass absolute path to the main git repository.")
+        if main_repo is None:
+            main_repo = path.abspath('')
 
         if revision is None:
             revision = 'HEAD'
@@ -65,7 +64,7 @@ class GitArchiver(object):
         self.exclude = exclude
         self.extra = extra
         self.force_sub = force_sub
-        self.main_repo_abspath = main_repo_abspath
+        self.main_repo = main_repo
         self.revision = revision
 
     def prepare_buffer_repo(self):
@@ -73,8 +72,9 @@ class GitArchiver(object):
         Prepares the buffer repository to export
 
         """
+        # Export full tree of files including every submodule recursively
         self.buffer_repo_path = path.join(tempfile.gettempdir(), str(int(time.time())))
-        self.run_shell('git clone --recursive ' + self.main_repo_abspath + ' ' + self.buffer_repo_path)
+        self.run_shell('git clone --recursive ' + self.main_repo + ' ' + self.buffer_repo_path)
         self.run_shell('git reset --hard ' + self.revision, self.buffer_repo_path)
         if self.verbose:
             print "Initialized temporary repository at {f}".format(f=self.buffer_repo_path)
@@ -142,12 +142,12 @@ class GitArchiver(object):
         for file_path in self.list_files():
             if not dry_run:
                 if self.verbose:
-                    print "Compressing {f} => {a}...".format(f=path.join(self.main_repo_abspath, file_path), a=path.join(self.prefix, file_path))
+                    print "Compressing {f} => {a}...".format(f=path.join(self.main_repo, file_path), a=path.join(self.prefix, file_path))
                 if not file_path in files:
-                    add(path.join(self.main_repo_abspath, file_path), file_path)
+                    add(path.join(self.buffer_repo_path, file_path), file_path)
                     files.add(file_path)
             else:
-                print "{f} => {a}".format(f=path.join(self.main_repo_abspath, file_path), a=path.join(self.prefix, file_path))
+                print "{f} => {a}".format(f=path.join(self.main_repo, file_path), a=path.join(self.prefix, file_path))
 
         output_archive.close()
         self.clean_buffer_repo()
@@ -286,7 +286,7 @@ class GitArchiver(object):
 
     def list_files(self, repo_path=''):
         """
-        An iterator method that yields a file path relative to main_repo_abspath
+        An iterator method that yields a file path relative to main_repo
         for each file that should be included in the archive.
         Skips those that match the exclusion patterns found in
         any discovered .gitattributes files along the way.
@@ -297,12 +297,25 @@ class GitArchiver(object):
         @param repo_path:   Path to the git submodule repository within the main git repository.
 
         @rtype:     iterator
-        @return:    Iterator to traverse files under git control relative to main_repo_abspath.
+        @return:    Iterator to traverse files under git control relative to main_repo.
         """
 
         repo_abspath = path.join(self.buffer_repo_path, repo_path)
-        repo_file_paths = self.run_shell('git ls-files --cached --full-name --exclude-standard', repo_abspath).splitlines()
+
+        if self.force_sub:
+            self.run_shell("git submodule init", repo_abspath)
+            self.run_shell("git submodule update", repo_abspath)
+
+        repo_file_paths = self.run_shell('git ls-files --cached --full-name', repo_abspath).splitlines()
+        submodule_paths = self.run_shell("git submodule --quiet foreach 'pwd'", repo_abspath).splitlines()
+
         exclude_patterns = self.get_exclude_patterns(repo_abspath, repo_file_paths)
+
+        # Eliminate redundant submodule references
+        for submodule_path in submodule_paths:
+            base_submodule_path = path.basename(submodule_path)
+            while base_submodule_path in repo_file_paths:
+                repo_file_paths.remove(base_submodule_path)
 
         for repo_file_path in repo_file_paths:
             repo_file_path = repo_file_path.decode('string_escape').strip('"')  # file path relative to current repo
@@ -315,16 +328,12 @@ class GitArchiver(object):
             main_repo_file_path = path.join(repo_path, repo_file_path)  # file path relative to the main repo
 
             # Yield both repo_file_path and main_repo_file_path to preserve structure of the repo.
-            yield main_repo_file_path
-
-        if self.force_sub:
-            self.run_shell("git submodule init", repo_abspath)
-            self.run_shell("git submodule update", repo_abspath)
+            yield main_repo_file_path # file path relative to the main repo
 
         # List files of every submodule.
-        for submodule_path in self.run_shell("git submodule --quiet foreach 'pwd'", repo_abspath).splitlines():
+        for submodule_path in submodule_paths:
             # In order to get output path we need to exclude repository path from submodule_path.
-            submodule_path = path.relpath(submodule_path, self.main_repo_abspath)
+            submodule_path = path.relpath(submodule_path, self.buffer_repo_path)
             for file_path in self.list_files(submodule_path):
                 sub_repo_file_path = path.join(path.basename(submodule_path), path.relpath(file_path, submodule_path))
                 # FIXME: Take into considerations submodule's .gitignore and stuff
@@ -348,13 +357,13 @@ class GitArchiver(object):
 if __name__ == "__main__":
     from optparse import OptionParser
 
-    parser = OptionParser(usage="usage: %prog [-v] [--git-dir .] [--rev HEAD] [] [--prefix PREFIX] [--no-exclude] OUTPUT_FILE",
+    parser = OptionParser(usage="usage: %prog [-v] [--repo .] [--rev HEAD] [] [--prefix PREFIX] [--no-exclude] OUTPUT_FILE",
         version="%prog {version}".format(version=__version__))
 
-    parser.add_option('--git-dir',
+    parser.add_option('--repo',
         type='string',
-        dest='gitdir',
-        help="Specify working git repo directory.",
+        dest='gitrepo',
+        help="Specify working git repo.",
         default='.')
 
     parser.add_option('--rev',
@@ -419,7 +428,7 @@ if __name__ == "__main__":
                            options.exclude,
                            options.force_sub,
                            options.extra,
-                           options.gitdir,
+                           options.gitrepo,
                            options.revision)
 
     try:

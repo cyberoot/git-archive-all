@@ -10,7 +10,7 @@ Creates archive from the current state using `git ls-files --cached --full-name 
   
   **-h, --help**            Show this help message and exit.
 
-  **--git-dir**             Specify working git repo directory.
+  **--repo**  		    Specify working git repo directory or remote repo url.
 
   **--revision**            Specify revision or branch to export.
 
